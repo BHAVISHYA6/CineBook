@@ -1,0 +1,324 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// prisma/schema.prisma — CineBook Database Schema
+//
+// WHY THIS DESIGN:
+//   • All monetary values (prices) are stored as INTEGER in paise (₹1 = 100 paise)
+//     to avoid floating-point rounding errors inherent in financial calculations.
+//   • Enums are used for status fields so the database enforces allowed values,
+//     preventing invalid states from entering the system at the storage layer.
+//   • createdAt/updatedAt are added to every business entity for audit trails.
+//   • Unique constraints enforce inventory invariants (e.g., one ShowSeat row
+//     per show+seat combination). However, a unique constraint alone is NOT
+//     concurrency-safe for high-traffic booking — that is handled later with
+//     Redis locks + DB transactions in Phase 2/3.
+//   • Soft-delete is NOT used. Cancelled bookings remain with status CANCELLED
+//     so payment audit trails are preserved.
+// ─────────────────────────────────────────────────────────────────────────────
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─── ENUMS ───────────────────────────────────────────────────────────────────
+
+// User roles: regular customer or admin who manages content.
+enum Role {
+  USER
+  ADMIN
+}
+
+// Seat layout classification — affects display and can affect pricing tiers.
+enum SeatClass {
+  STANDARD
+  PREMIUM
+  RECLINER
+}
+
+// ShowSeat tracks per-show availability. BOOKED is a permanent state set only
+// after a payment is confirmed. HELD is a transient state (managed by Redis
+// in Phase 2) that indicates a user has temporarily reserved the seat.
+// We store HELD in DB as well for resilience, but Redis TTL is the primary
+// expiry mechanism.
+enum SeatStatus {
+  AVAILABLE
+  HELD       // Temporarily held, pending payment
+  BOOKED     // Permanently allocated after confirmed payment
+}
+
+// Booking lifecycle:
+//   PENDING    → order created, payment not yet confirmed
+//   CONFIRMED  → payment verified, seats permanently allocated
+//   CANCELLED  → user or system cancelled before confirmation
+//   EXPIRED    → payment window elapsed without confirmation
+enum BookingStatus {
+  PENDING
+  CONFIRMED
+  CANCELLED
+  EXPIRED
+}
+
+// PaymentAttempt tracks every payment attempt, including failures.
+// A booking can have multiple attempts (user retries after failed card).
+enum PaymentStatus {
+  INITIATED
+  SUCCESS
+  FAILED
+  REFUNDED
+}
+
+// ─── USER ────────────────────────────────────────────────────────────────────
+
+// Stores registered users. Passwords are bcrypt-hashed — plain text is never stored.
+model User {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  // Password is always stored as a bcrypt hash — never plaintext.
+  password  String
+  name      String
+  phone     String?
+  role      Role     @default(USER)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  bookings Booking[]
+
+  @@map("users")
+}
+
+// ─── MOVIE ───────────────────────────────────────────────────────────────────
+
+// Represents a film in the catalog. Not tied to a specific screening.
+model Movie {
+  id          String   @id @default(cuid())
+  title       String
+  description String?
+  // Duration stored in minutes — simple integer, easy to display.
+  durationMin Int
+  genre       String[]
+  language    String
+  // Rating string like "U", "UA", "A" (CBFC certification).
+  rating      String?
+  posterUrl   String?
+  // releaseDate only (no time), since it's a calendar date.
+  releaseDate DateTime @db.Date
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  shows Show[]
+
+  // Index for browsing active movies — most common query on landing page.
+  @@index([isActive, releaseDate])
+  @@map("movies")
+}
+
+// ─── THEATRE & SCREEN ────────────────────────────────────────────────────────
+
+// A physical cinema property (e.g., "PVR Phoenix Mall").
+model Theatre {
+  id        String   @id @default(cuid())
+  name      String
+  city      String
+  address   String
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  screens Screen[]
+
+  // Index for filtering theatres by city.
+  @@index([city, isActive])
+  @@map("theatres")
+}
+
+// A single auditorium within a Theatre (e.g., "Screen 3 – Dolby Atmos").
+model Screen {
+  id        String   @id @default(cuid())
+  name      String
+  // totalSeats is the physical count — authoritative figure for this screen.
+  totalSeats Int
+  theatreId String
+  theatre   Theatre  @relation(fields: [theatreId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  seats Seat[]
+  shows Show[]
+
+  @@map("screens")
+}
+
+// ─── SEAT ────────────────────────────────────────────────────────────────────
+
+// Physical seat definition within a Screen. Row + number uniquely identify it.
+// This is the static layout — availability per show is tracked in ShowSeat.
+model Seat {
+  id       String    @id @default(cuid())
+  row      String    // e.g., "A", "B"
+  number   Int       // e.g., 1, 2, 3
+  class    SeatClass @default(STANDARD)
+  screenId String
+  screen   Screen    @relation(fields: [screenId], references: [id], onDelete: Cascade)
+
+  showSeats ShowSeat[]
+
+  // A seat's position (row + number) must be unique within its screen.
+  @@unique([screenId, row, number])
+  @@index([screenId])
+  @@map("seats")
+}
+
+// ─── SHOW ─────────────────────────────────────────────────────────────────────
+
+// A single screening of a Movie on a Screen at a specific time.
+// One Show has many ShowSeats (one per physical Seat in the Screen).
+model Show {
+  id        String   @id @default(cuid())
+  movieId   String
+  movie     Movie    @relation(fields: [movieId], references: [id], onDelete: Restrict)
+  screenId  String
+  screen    Screen   @relation(fields: [screenId], references: [id], onDelete: Restrict)
+  // startsAt: exact UTC datetime of the screening.
+  startsAt  DateTime
+  // endsAt: computed from startsAt + movie duration, stored for query convenience.
+  endsAt    DateTime
+  // Base price in paise (₹1 = 100 paise). Premium/recliner seats may add a
+  // surcharge stored on the ShowSeat row itself.
+  basePricePaise Int
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  showSeats ShowSeat[]
+  bookings  Booking[]
+
+  // A screen cannot have two overlapping shows (enforced at application layer
+  // since DB doesn't natively support range overlap uniqueness efficiently).
+  // Index to quickly retrieve upcoming shows for a movie or screen.
+  @@index([movieId, startsAt])
+  @@index([screenId, startsAt])
+  @@map("shows")
+}
+
+// ─── SHOW SEAT (Inventory) ───────────────────────────────────────────────────
+
+// Per-show seat inventory row. This is the central concurrency battleground.
+//
+// CONCURRENCY SAFETY NOTE:
+//   The UNIQUE constraint on (showId, seatId) prevents duplicate inventory rows
+//   but does NOT alone prevent two concurrent transactions from both reading
+//   status=AVAILABLE and both attempting to set status=BOOKED.
+//   Full double-booking prevention requires either:
+//     (a) SELECT ... FOR UPDATE (pessimistic lock) inside a transaction, OR
+//     (b) Optimistic concurrency with a version field, OR
+//     (c) Redis atomic SETNX before any DB write (our chosen approach, Phase 2).
+//   This distinction is critical and documented here for learning purposes.
+//
+// pricePaise: allows class-based surcharges on top of Show.basePricePaise.
+model ShowSeat {
+  id         String     @id @default(cuid())
+  showId     String
+  show       Show       @relation(fields: [showId], references: [id], onDelete: Cascade)
+  seatId     String
+  seat       Seat       @relation(fields: [seatId], references: [id], onDelete: Cascade)
+  status     SeatStatus @default(AVAILABLE)
+  pricePaise Int
+  // heldByUserId: set when status=HELD so we know who holds this seat.
+  heldByUserId String?
+  // heldUntil: expiry timestamp for the hold (Redis TTL mirrors this).
+  heldUntil  DateTime?
+  // bookingId: set when the seat is permanently BOOKED.
+  bookingId  String?
+  booking    Booking?   @relation(fields: [bookingId], references: [id])
+  createdAt  DateTime   @default(now())
+  updatedAt  DateTime   @updatedAt
+
+  // Each physical seat can only appear once per show — enforces inventory integrity.
+  @@unique([showId, seatId])
+  // Common query: fetch all seats for a show to render the seat map.
+  @@index([showId, status])
+  @@map("show_seats")
+}
+
+// ─── BOOKING ─────────────────────────────────────────────────────────────────
+
+// Represents a user's booking request for one or more ShowSeats in a single Show.
+// A booking starts as PENDING (seats held, payment not complete) and transitions
+// to CONFIRMED once Razorpay payment is verified.
+model Booking {
+  id              String        @id @default(cuid())
+  userId          String
+  user            User          @relation(fields: [userId], references: [id], onDelete: Restrict)
+  showId          String
+  show            Show          @relation(fields: [showId], references: [id], onDelete: Restrict)
+  status          BookingStatus @default(PENDING)
+  // totalAmountPaise: sum of pricePaise across all booked ShowSeats.
+  totalAmountPaise Int
+  // razorpayOrderId: set when Razorpay order is created (Phase 3).
+  razorpayOrderId String?       @unique
+  // expiresAt: when this PENDING booking expires if payment is not completed.
+  expiresAt       DateTime?
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+
+  showSeats      ShowSeat[]
+  paymentAttempts PaymentAttempt[]
+
+  @@index([userId, status])
+  @@index([showId, status])
+  @@map("bookings")
+}
+
+// ─── PAYMENT ATTEMPT ─────────────────────────────────────────────────────────
+
+// Records every payment attempt for a booking, including failures.
+// Keeping all attempts enables reconciliation and fraud review.
+// A booking can have multiple attempts (user retries after a failed card).
+//
+// WHY SEPARATE FROM BOOKING:
+//   Mixing payment data into the booking row creates update conflicts and
+//   loses the history of attempts. A 1:many relationship gives full audit trail.
+model PaymentAttempt {
+  id                 String        @id @default(cuid())
+  bookingId          String
+  booking            Booking       @relation(fields: [bookingId], references: [id], onDelete: Restrict)
+  status             PaymentStatus @default(INITIATED)
+  // amountPaise: should match booking.totalAmountPaise for final confirmed payment.
+  amountPaise        Int
+  // Provider-assigned identifiers for reconciliation with Razorpay dashboard.
+  providerOrderId    String?
+  providerPaymentId  String?
+  providerSignature  String?
+  // errorCode: gateway error code if status=FAILED (helps support diagnosis).
+  errorCode          String?
+  createdAt          DateTime      @default(now())
+  updatedAt          DateTime      @updatedAt
+
+  @@index([bookingId])
+  @@map("payment_attempts")
+}
+
+// ─── PROCESSED WEBHOOK EVENT ─────────────────────────────────────────────────
+
+// Stores the IDs of Razorpay webhook events already processed.
+// WHY THIS EXISTS:
+//   Payment gateways can deliver the same webhook event more than once
+//   (network retries, provider restarts). Without deduplication, a single
+//   successful payment event could confirm a booking multiple times or
+//   trigger double-allocation. Checking this table before processing
+//   makes webhook handling idempotent.
+model ProcessedWebhookEvent {
+  id          String   @id @default(cuid())
+  // eventId: the unique ID sent by Razorpay in the webhook payload.
+  eventId     String   @unique
+  // eventType: e.g., "payment.captured", "payment.failed"
+  eventType   String
+  processedAt DateTime @default(now())
+
+  @@map("processed_webhook_events")
+}
