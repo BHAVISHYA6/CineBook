@@ -8,6 +8,7 @@
 
 const prisma = require('../config/db');
 const { AppError } = require('../middleware/errorHandler');
+const cacheService = require('../services/cache.service');
 
 /**
  * GET /api/theatres
@@ -29,6 +30,12 @@ async function getTheatres(req, res, next) {
       where.city = { equals: city.trim(), mode: 'insensitive' };
     }
 
+    const cacheKey = `theatres:list:city=${city || ''}:active=${where.isActive}`;
+    const cachedResult = await cacheService.get(cacheKey);
+    if (cachedResult) {
+      return res.status(200).json(cachedResult);
+    }
+
     const theatres = await prisma.theatre.findMany({
       where,
       include: {
@@ -43,10 +50,15 @@ async function getTheatres(req, res, next) {
       orderBy: { name: 'asc' },
     });
 
-    return res.status(200).json({
+    const responseData = {
       success: true,
       data: { theatres },
-    });
+    };
+
+    // Cache theatres list with 5-minute TTL
+    await cacheService.set(cacheKey, responseData, cacheService.DEFAULT_TTLS.MEDIUM);
+
+    return res.status(200).json(responseData);
   } catch (err) {
     next(err);
   }
@@ -59,6 +71,12 @@ async function getTheatres(req, res, next) {
 async function getTheatreById(req, res, next) {
   try {
     const { id } = req.params;
+
+    const cacheKey = `theatres:detail:${id}`;
+    const cachedResult = await cacheService.get(cacheKey);
+    if (cachedResult) {
+      return res.status(200).json(cachedResult);
+    }
 
     const theatre = await prisma.theatre.findUnique({
       where: { id },
@@ -77,10 +95,15 @@ async function getTheatreById(req, res, next) {
       throw new AppError('Theatre not found', 404, 'NOT_FOUND');
     }
 
-    return res.status(200).json({
+    const responseData = {
       success: true,
       data: { theatre },
-    });
+    };
+
+    // Cache theatre detail with 1-hour TTL
+    await cacheService.set(cacheKey, responseData, cacheService.DEFAULT_TTLS.LONG);
+
+    return res.status(200).json(responseData);
   } catch (err) {
     next(err);
   }
@@ -114,6 +137,9 @@ async function createTheatre(req, res, next) {
         isActive: true,
       },
     });
+
+    // Invalidate cached theatres list
+    await cacheService.deleteByPattern('theatres:list:*');
 
     return res.status(201).json({
       success: true,
@@ -237,6 +263,12 @@ async function createScreen(req, res, next) {
 
       return fullScreen;
     });
+
+    // Invalidate cached theatre details and theatres list (since screens/seat counts changed)
+    await Promise.all([
+      cacheService.del(`theatres:detail:${theatreId}`),
+      cacheService.deleteByPattern('theatres:list:*'),
+    ]);
 
     return res.status(201).json({
       success: true,

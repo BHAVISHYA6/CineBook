@@ -136,10 +136,11 @@ If already processed, it returns 200 without re-executing. This is **idempotent 
 | 1 | ✅ Complete | Backend foundation: Express, Prisma, health endpoints, tests |
 | 2 | ✅ Complete | User Authentication: JWT, bcrypt, register/login/me, auth middleware, test suite |
 | 3 | ✅ Complete | Movies, Theatres, Screens, Seats & Shows APIs (Public & Admin) |
-| 4 | 🔜 Pending | Redis seat locking + Socket.IO real-time updates |
-| 5 | 🔜 Pending | Booking engine + Razorpay test mode payment |
-| 6 | 🔜 Pending | React frontend (Vite + Tailwind CSS) |
-| 7 | 🔜 Pending | Load tests + performance benchmarks (Autocannon) |
+| 4 | ✅ Complete | Redis Caching (Cache-aside for catalog APIs, invalidations, fallback) |
+| 5 | 🔜 Pending | Redis temporary seat locking + Socket.IO real-time seat sync |
+| 6 | 🔜 Pending | Booking engine + Razorpay test mode payment |
+| 7 | 🔜 Pending | React frontend (Vite + Tailwind CSS) |
+| 8 | 🔜 Pending | Load tests + performance benchmarks (Autocannon) |
 
 ---
 
@@ -270,6 +271,44 @@ If already processed, it returns 200 without re-executing. This is **idempotent 
 - `POST /api/theatres` — Create physical theatre.
 - `POST /api/theatres/:id/screens` — Create screen and generate physical seat grid inside a single Prisma transaction.
 - `POST /api/shows` — Schedule a show: verifies movie is active, ensures screen has seats, computes duration + 15 min buffer, prevents overlapping shows on the screen, and creates all `ShowSeat` inventory records transactionally.
+
+---
+
+### Phase 4 — Redis Caching (✅ Complete)
+
+- **Date**: 2026-11-16
+- **Status**: Completed implementation.
+- **What happened**: Implemented resilient, modular Redis caching using `ioredis`. Configured cache-aside pattern on high-read catalog endpoints with sensible TTLs, automated cache invalidations on admin modifications, and graceful degradation to direct PostgreSQL queries whenever Redis is unavailable.
+
+#### Files Created / Modified
+
+| File | Type | Purpose |
+|---|---|---|
+| `server/src/config/redis.js` | Created | Resilient singleton Redis client with reconnect strategy, offline queue management, health status checking, and non-blocking error listeners. |
+| `server/src/services/cache.service.js` | Created | Reusable cache service providing fail-safe `get`, `set`, `del`, `deleteByPattern`, `remember` operations with default TTL presets (SHORT: 60s, MEDIUM: 300s, LONG: 3600s). |
+| `server/src/config/env.js` | Modified | Added `redisUrl` configuration (defaults to `redis://localhost:6379`). |
+| `server/.env` & `server/.env.example` | Modified | Added `REDIS_URL` environment variable. |
+| `server/src/controllers/movie.controller.js` | Modified | Added cache-aside caching on `GET /api/movies` (300s) and `GET /api/movies/:id` (3600s); added automated invalidation on movie create, update, and deactivation. |
+| `server/src/controllers/theatre.controller.js` | Modified | Added cache-aside caching on `GET /api/theatres` (300s) and `GET /api/theatres/:id` (3600s); added invalidation on theatre and screen creation. |
+| `server/src/controllers/show.controller.js` | Modified | Added cache-aside caching on `GET /api/shows/:id` (60s); added invalidation on show scheduling. (Dynamic seat inventory `GET /api/shows/:id/seats` is purposefully NOT cached). |
+| `server/src/server.js` | Modified | Added clean Redis client disconnection during graceful server shutdown. |
+| `server/package.json` | Modified | Installed `ioredis` package. |
+
+#### Cache Keys and Invalidation Strategy
+
+| Endpoint / Operation | Cache Key Pattern | TTL | Invalidation Triggers |
+|---|---|---|---|
+| `GET /api/movies` | `movies:list:page=..:limit=..:search=..:genre=..:lang=..:active=..` | 300s (5m) | `POST /api/movies`, `PATCH /api/movies/:id`, `DELETE /api/movies/:id` (`movies:list:*`) |
+| `GET /api/movies/:id` | `movies:detail:{id}` | 3600s (1h) | `PATCH /api/movies/:id`, `DELETE /api/movies/:id` |
+| `GET /api/theatres` | `theatres:list:city=..:active=..` | 300s (5m) | `POST /api/theatres`, `POST /api/theatres/:id/screens` (`theatres:list:*`) |
+| `GET /api/theatres/:id` | `theatres:detail:{id}` | 3600s (1h) | `POST /api/theatres/:id/screens` |
+| `GET /api/shows/:id` | `shows:detail:{id}` | 60s (1m) | `POST /api/shows` |
+| `GET /api/shows/:id/seats` | **NEVER CACHED** | N/A | Kept dynamic to avoid stale seat reservation status. |
+
+#### Graceful Degradation Design
+- All cache service methods check `isRedisHealthy()` before sending commands.
+- All operations are wrapped in `try/catch` and log a non-fatal warning on errors.
+- If Redis is down, calls immediately fallback to querying PostgreSQL directly with zero request interruption.
 
 ---
 

@@ -8,6 +8,7 @@
 
 const prisma = require('../config/db');
 const { AppError } = require('../middleware/errorHandler');
+const cacheService = require('../services/cache.service');
 
 /**
  * GET /api/movies
@@ -46,6 +47,12 @@ async function getMovies(req, res, next) {
       where.language = { equals: language.trim(), mode: 'insensitive' };
     }
 
+    const cacheKey = `movies:list:page=${page}:limit=${limit}:search=${search || ''}:genre=${genre || ''}:lang=${language || ''}:active=${where.isActive}`;
+    const cachedResult = await cacheService.get(cacheKey);
+    if (cachedResult) {
+      return res.status(200).json(cachedResult);
+    }
+
     const [total, movies] = await Promise.all([
       prisma.movie.count({ where }),
       prisma.movie.findMany({
@@ -56,7 +63,7 @@ async function getMovies(req, res, next) {
       }),
     ]);
 
-    return res.status(200).json({
+    const responseData = {
       success: true,
       data: {
         movies,
@@ -67,7 +74,12 @@ async function getMovies(req, res, next) {
           totalPages: Math.ceil(total / limit),
         },
       },
-    });
+    };
+
+    // Cache list with 5-minute TTL
+    await cacheService.set(cacheKey, responseData, cacheService.DEFAULT_TTLS.MEDIUM);
+
+    return res.status(200).json(responseData);
   } catch (err) {
     next(err);
   }
@@ -81,6 +93,12 @@ async function getMovieById(req, res, next) {
   try {
     const { id } = req.params;
 
+    const cacheKey = `movies:detail:${id}`;
+    const cachedResult = await cacheService.get(cacheKey);
+    if (cachedResult) {
+      return res.status(200).json(cachedResult);
+    }
+
     const movie = await prisma.movie.findUnique({
       where: { id },
     });
@@ -89,10 +107,15 @@ async function getMovieById(req, res, next) {
       throw new AppError('Movie not found', 404, 'NOT_FOUND');
     }
 
-    return res.status(200).json({
+    const responseData = {
       success: true,
       data: { movie },
-    });
+    };
+
+    // Cache movie detail with 1-hour TTL (static metadata)
+    await cacheService.set(cacheKey, responseData, cacheService.DEFAULT_TTLS.LONG);
+
+    return res.status(200).json(responseData);
   } catch (err) {
     next(err);
   }
@@ -237,6 +260,9 @@ async function createMovie(req, res, next) {
       },
     });
 
+    // Invalidate cached movie lists so new movie appears
+    await cacheService.deleteByPattern('movies:list:*');
+
     return res.status(201).json({
       success: true,
       message: 'Movie created successfully',
@@ -337,6 +363,12 @@ async function updateMovie(req, res, next) {
       data: updateData,
     });
 
+    // Invalidate cached movie detail and all movie lists
+    await Promise.all([
+      cacheService.del(`movies:detail:${id}`),
+      cacheService.deleteByPattern('movies:list:*'),
+    ]);
+
     return res.status(200).json({
       success: true,
       message: 'Movie updated successfully',
@@ -367,6 +399,12 @@ async function deleteMovie(req, res, next) {
       where: { id },
       data: { isActive: false },
     });
+
+    // Invalidate cached movie detail and all movie lists
+    await Promise.all([
+      cacheService.del(`movies:detail:${id}`),
+      cacheService.deleteByPattern('movies:list:*'),
+    ]);
 
     return res.status(200).json({
       success: true,

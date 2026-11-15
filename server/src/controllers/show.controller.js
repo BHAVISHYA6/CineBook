@@ -8,6 +8,7 @@
 
 const prisma = require('../config/db');
 const { AppError } = require('../middleware/errorHandler');
+const cacheService = require('../services/cache.service');
 
 /**
  * GET /api/shows/:id
@@ -16,6 +17,12 @@ const { AppError } = require('../middleware/errorHandler');
 async function getShowById(req, res, next) {
   try {
     const { id } = req.params;
+
+    const cacheKey = `shows:detail:${id}`;
+    const cachedResult = await cacheService.get(cacheKey);
+    if (cachedResult) {
+      return res.status(200).json(cachedResult);
+    }
 
     const show = await prisma.show.findUnique({
       where: { id },
@@ -33,10 +40,15 @@ async function getShowById(req, res, next) {
       throw new AppError('Show not found', 404, 'NOT_FOUND');
     }
 
-    return res.status(200).json({
+    const responseData = {
       success: true,
       data: { show },
-    });
+    };
+
+    // Cache show details with 1-minute TTL (shows have upcoming schedules)
+    await cacheService.set(cacheKey, responseData, cacheService.DEFAULT_TTLS.SHORT);
+
+    return res.status(200).json(responseData);
   } catch (err) {
     next(err);
   }
@@ -281,6 +293,9 @@ async function createShow(req, res, next) {
         },
       },
     });
+
+    // Invalidate any cached show details or movie show listings
+    await cacheService.del(`shows:detail:${newShow.id}`);
 
     return res.status(201).json({
       success: true,

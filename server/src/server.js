@@ -24,6 +24,7 @@ const http = require('http');
 const { validateEnv, config } = require('./config/env');
 const app = require('./app');
 const prisma = require('./config/db');
+const { redis } = require('./config/redis');
 
 // ─── STARTUP ──────────────────────────────────────────────────────────────────
 
@@ -67,6 +68,16 @@ async function startServer() {
         console.log('   Database connection closed.');
       } catch (err) {
         console.error('   Error disconnecting database:', err.message);
+      }
+
+      try {
+        // Disconnect Redis client if initialized
+        if (redis) {
+          redis.disconnect();
+          console.log('   Redis client disconnected.');
+        }
+      } catch (err) {
+        console.error('   Error disconnecting Redis:', err.message);
       }
 
       console.log('   Shutdown complete. Goodbye! 👋\n');

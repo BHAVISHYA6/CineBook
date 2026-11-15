@@ -44,6 +44,7 @@ const config = {
     expiresIn: process.env.JWT_EXPIRES_IN || '7d',
   },
   clientUrl: process.env.CLIENT_URL || 'http://localhost:5173',
+  redisUrl: process.env.REDIS_URL || 'redis://localhost:6379',
   isProduction: process.env.NODE_ENV === 'production',
   isDevelopment: process.env.NODE_ENV === 'development',
   isTest: process.env.NODE_ENV === 'test',
