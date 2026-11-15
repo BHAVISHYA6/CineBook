@@ -1,0 +1,180 @@
+================================================================================
+CINEBOOK — PHASE 2: USER AUTHENTICATION SUMMARY & ARCHITECTURE UNDERSTANDINGS
+================================================================================
+
+1. NEW API ENDPOINTS IMPLEMENTED
+--------------------------------------------------------------------------------
+All endpoints are available at `/api/auth` (and mirrored at `/api/v1/auth`):
+
+• POST /api/auth/register
+  - Public endpoint.
+  - Registers a new user.
+  - Input: { name, email, password, phone? }
+  - Enforces `role: 'USER'` (neutralizes client tampering / privilege escalation).
+  - Validates email format, required name, password >= 6 characters.
+  - Checks duplicate email (returns 409 Conflict if registered).
+  - Hashes password using bcrypt (10 salt rounds).
+  - Issues signed JWT and returns 201 Created with safe user profile (no password).
+
+• POST /api/auth/login
+  - Public endpoint.
+  - Authenticates user credentials.
+  - Input: { email, password }
+  - Normalizes email (lowercase, trimmed).
+  - Verifies bcrypt password hash against stored record.
+  - Returns generic 401 Unauthorized ('Invalid email or password') on failure
+    to eliminate username enumeration.
+  - Returns 200 OK with safe user profile and signed JWT on success.
+
+• GET /api/auth/me
+  - Protected endpoint requiring Bearer JWT.
+  - Header: Authorization: Bearer <token>
+  - Verified by `authenticate` middleware.
+  - Returns 200 OK with the authenticated user's safe profile.
+
+
+2. CHANGED & CREATED FILES
+--------------------------------------------------------------------------------
+Created:
+• server/src/utils/auth.utils.js
+  - `hashPassword(password)`: Bcrypt hashing with 10 salt rounds.
+  - `comparePassword(password, hash)`: Bcrypt hash comparison.
+  - `generateToken(payload)`: JWT generation via process.env.JWT_SECRET & JWT_EXPIRES_IN.
+  - `verifyToken(token)`: JWT signature & expiry validation.
+  - `toSafeUser(user)`: Strips password field, returning safe public user data.
+
+• server/src/middleware/auth.js
+  - `authenticate`: Extracts Bearer token, verifies JWT, checks that the user
+    still exists in the database, attaches `req.user` and `req.userId`.
+  - `authorize(...roles)`: Role-based authorization guard for role restriction.
+
+• server/src/controllers/auth.controller.js
+  - `register`: Validates input, prevents role escalation, checks duplicates, creates user.
+  - `login`: Validates input, verifies credentials safely, generates JWT.
+  - `getMe`: Returns `req.user`.
+
+• server/src/routes/auth.routes.js
+  - Mounts routes to controllers and applies `authenticate` to `/me`.
+
+• server/tests/auth.test.js
+  - 16 automated integration tests covering all positive/negative scenarios.
+
+Modified:
+• server/src/app.js
+  - Mounted `authRoutes` to `/api/auth` and `/api/v1/auth`.
+• server/src/config/db.js
+  - Configured `@prisma/adapter-pg` driver adapter required by Prisma 7.10.0.
+• server/prisma/seed.js
+  - Updated to use `@prisma/adapter-pg` driver adapter.
+• server/tests/schema.test.js
+  - Updated to use `@prisma/adapter-pg` driver adapter.
+• server/package.json
+  - Added `@prisma/adapter-pg` and `pg` for PostgreSQL connection compatibility.
+• MYFINDINGS.md
+  - Documented Phase 2 implementation, tests, bug fixes, and Postman testing guide.
+
+
+3. SECURITY & SYSTEM DESIGN HIGHLIGHTS
+--------------------------------------------------------------------------------
+1. No Plaintext Passwords:
+   - Password hashing is enforced via bcryptjs with 10 rounds.
+   - Plaintext passwords are never logged, stored, or sent in response payloads.
+2. Privilege Escalation Prevention:
+   - Registration explicitly sets `role: 'USER'`, ignoring any client-sent `role`.
+3. Safe User Serialization:
+   - `toSafeUser` ensures the password hash is excluded from all JSON responses.
+4. Information Disclosure Mitigation:
+   - Login failure responds with a generic `INVALID_CREDENTIALS` code and message,
+     preventing attackers from guessing whether an email exists.
+5. Fail-Fast Environment Configuration:
+   - `JWT_SECRET` and `JWT_EXPIRES_IN` are verified at boot time via `env.js`.
+6. Prisma 7 Driver Adapter Compatibility:
+   - In Prisma 7, PostgreSQL connections require the `@prisma/adapter-pg` driver
+     adapter. Initialized cleanly in `db.js`.
+
+
+4. EXACT AUTOMATED TEST RESULTS
+--------------------------------------------------------------------------------
+Command executed: `npm test` (`jest --runInBand --forceExit`)
+
+Result:
+Test Suites: 3 passed, 3 total
+Tests:       27 passed, 3 skipped, 30 total
+Time:        3.055 s
+
+Suite breakdown:
+1. `tests/auth.test.js`: 16 passed, 0 failed
+   - Registration with 201 status and JWT [PASS]
+   - Privilege escalation blocked (ADMIN forced to USER) [PASS]
+   - Duplicate email returns 409 Conflict [PASS]
+   - Missing name returns 400 Bad Request [PASS]
+   - Invalid email returns 400 Bad Request [PASS]
+   - Short password (< 6 chars) returns 400 Bad Request [PASS]
+   - Login with valid credentials returns 200 OK and JWT [PASS]
+   - Login with wrong password returns 401 Unauthorized [PASS]
+   - Login with non-existent email returns 401 Unauthorized [PASS]
+   - Missing login credentials returns 400 Bad Request [PASS]
+   - GET /api/auth/me returns safe profile with valid token [PASS]
+   - GET /api/auth/me rejects missing token with 401 [PASS]
+   - GET /api/auth/me rejects malformed token header with 401 [PASS]
+   - GET /api/auth/me rejects invalid or tampered JWT with 401 [PASS]
+   - GET /api/auth/me rejects token for deleted/non-existent user with 401 [PASS]
+   - Versioned alias /api/v1/auth/me works identically [PASS]
+2. `tests/health.test.js`: 10 passed, 0 failed
+   - All system and DB health checks passed [PASS]
+3. `tests/schema.test.js`: 1 passed, 3 skipped (waiting for local PostgreSQL)
+
+
+5. POSTMAN / MANUAL TESTING INSTRUCTIONS
+--------------------------------------------------------------------------------
+To test manually once the server is running (`npm run dev` in `server/`):
+
+Step 1: Register User
+• Method: POST
+• URL: http://localhost:5000/api/auth/register
+• Headers:
+    Content-Type: application/json
+• Body (JSON):
+    {
+      "name": "Bruce Wayne",
+      "email": "bruce@waynecorp.com",
+      "password": "batmanpassword123",
+      "phone": "9998887776"
+    }
+• Expected Status: 201 Created
+• Copy the "token" value from response.data.token.
+
+Step 2: Login User
+• Method: POST
+• URL: http://localhost:5000/api/auth/login
+• Headers:
+    Content-Type: application/json
+• Body (JSON):
+    {
+      "email": "bruce@waynecorp.com",
+      "password": "batmanpassword123"
+    }
+• Expected Status: 200 OK
+
+Step 3: Get User Profile (Protected)
+• Method: GET
+• URL: http://localhost:5000/api/auth/me
+• Headers:
+    Authorization: Bearer <paste_token_here>
+• Expected Status: 200 OK
+• Response Body:
+    {
+      "success": true,
+      "data": {
+        "user": {
+          "id": "...",
+          "name": "Bruce Wayne",
+          "email": "bruce@waynecorp.com",
+          "phone": "9998887776",
+          "role": "USER",
+          "createdAt": "...",
+          "updatedAt": "..."
+        }
+      }
+    }
+================================================================================
