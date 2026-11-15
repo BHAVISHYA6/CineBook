@@ -32,6 +32,7 @@ const movieRoutes = require('./routes/movie.routes');
 const theatreRoutes = require('./routes/theatre.routes');
 const showRoutes = require('./routes/show.routes');
 const bookingRoutes = require('./routes/booking.routes');
+const paymentRoutes = require('./routes/payment.routes');
 const { notFoundHandler, errorHandler } = require('./middleware/errorHandler');
 
 const app = express();
@@ -50,7 +51,15 @@ app.use(
 
 // ─── BODY PARSERS ─────────────────────────────────────────────────────────────
 // Parse incoming JSON request bodies. Limit size to prevent large payload attacks.
-app.use(express.json({ limit: '10kb' }));
+// Capture rawBody for accurate Razorpay webhook signature verification
+app.use(
+  express.json({
+    limit: '10kb',
+    verify: (req, res, buf) => {
+      req.rawBody = buf;
+    },
+  })
+);
 app.use(express.urlencoded({ extended: false, limit: '10kb' }));
 
 // ─── REQUEST LOGGING ──────────────────────────────────────────────────────────
@@ -83,6 +92,10 @@ app.use('/api/v1/shows', showRoutes);
 // Booking and seat reservation endpoints
 app.use('/api/bookings', bookingRoutes);
 app.use('/api/v1/bookings', bookingRoutes);
+
+// Payment endpoints (Razorpay order, verification, webhook)
+app.use('/api/payments', paymentRoutes);
+app.use('/api/v1/payments', paymentRoutes);
 
 // ─── ERROR HANDLING (MUST BE LAST) ────────────────────────────────────────────
 // 404 for any route that didn't match above.

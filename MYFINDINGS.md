@@ -138,9 +138,9 @@ If already processed, it returns 200 without re-executing. This is **idempotent 
 | 3 | ✅ Complete | Movies, Theatres, Screens, Seats & Shows APIs (Public & Admin) |
 | 4 | ✅ Complete | Redis Caching (Cache-aside for catalog APIs, invalidations, fallback) |
 | 5 | ✅ Complete | Concurrency-Safe Seat Locking (Redis SETNX TTL + PostgreSQL Transactions) |
-| 6 | 🔜 Pending | Socket.IO real-time seat status synchronization |
-| 7 | 🔜 Pending | Booking checkout + Razorpay test mode payments & webhook idempotency |
-| 8 | 🔜 Pending | React frontend (Vite + Tailwind CSS) |
+| 6 | ✅ Complete | Razorpay Test Mode Payment, Signature Verification & Idempotent Webhook |
+| 7 | ✅ Complete | Production-Ready React + Vite + Tailwind CSS Frontend |
+| 8 | 🔜 Pending | Socket.IO real-time backend broadcast integration |
 | 9 | 🔜 Pending | Load tests + concurrency benchmarks (Autocannon) |
 
 ---
@@ -350,6 +350,97 @@ If already processed, it returns 200 without re-executing. This is **idempotent 
    - Both Redis key TTL (10m) and PostgreSQL `heldUntil` timestamp enforce a 10-minute hold window. Expired holds are automatically eligible for new reservations.
 5. **No Schema Changes**:
    - Successfully reused existing `ShowSeat` (`heldByUserId`, `heldUntil`, `status: HELD`) and `Booking` (`status: PENDING`, `expiresAt`) models without altering the Prisma schema.
+
+---
+
+### Phase 6 — Razorpay Payment Integration (✅ Complete)
+
+- **Date**: 2026-11-16
+- **Status**: Completed implementation.
+- **What happened**: Implemented end-to-end payment workflow in Razorpay Test Mode, including order generation, timing-safe HMAC SHA256 signature verification, transactional seat confirmation (`ShowSeat` -> `BOOKED`), audit trails (`PaymentAttempt`), and idempotent webhook processing (`ProcessedWebhookEvent`).
+
+#### Files Created / Modified
+
+| File | Type | Purpose |
+|---|---|---|
+| `server/src/config/razorpay.js` | Created | Configured official `Razorpay` SDK client instance in Test Mode with keys loaded from environment variables. |
+| `server/src/services/payment.service.js` | Created | Business logic for creating orders, validating reservation expiration and ownership, verifying HMAC SHA256 signatures, atomic DB seat confirmation with `show_seats` update and Redis lock release, and deduplicated webhook processing. |
+| `server/src/controllers/payment.controller.js` | Created | Handlers for `/api/payments/create-order`, `/api/payments/verify`, and `/api/payments/webhook`. |
+| `server/src/routes/payment.routes.js` | Created | Payment routing with JWT authentication for user flows and public signature-checked webhook route. |
+| `server/src/config/env.js` | Modified | Added `razorpay` config section (`keyId`, `keySecret`, `webhookSecret`). |
+| `server/.env` & `server/.env.example` | Modified | Added `RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET`, and `RAZORPAY_WEBHOOK_SECRET`. |
+| `server/src/app.js` | Modified | Enabled raw body buffer capture (`req.rawBody`) for webhook signature verification and mounted `/api/payments` endpoints. |
+| `server/package.json` | Modified | Added `razorpay` package dependency. |
+
+#### Payment APIs Implemented
+
+| Method | Endpoint | Auth | Description |
+|---|---|---|---|
+| `POST` | `/api/payments/create-order` | User JWT | Validates booking hold, checks ownership, and generates or reuses Razorpay test order. Returns `orderId`, `amountPaise`, and public `keyId`. |
+| `POST` | `/api/payments/verify` | User JWT | Verifies Razorpay HMAC SHA256 signature using `timingSafeEqual`. Inside a Prisma transaction: marks `Booking` as `CONFIRMED`, `ShowSeat` as `BOOKED`, creates `PaymentAttempt` record, and releases temporary Redis locks. |
+| `POST` | `/api/payments/webhook` | Webhook Signature Header | Validates `x-razorpay-signature`. Checks `ProcessedWebhookEvent` table for idempotency, updates booking/seats on payment events, and returns 200. |
+
+#### Security & Robustness Highlights
+
+1. **Secret Isolation**:
+   - `RAZORPAY_KEY_SECRET` and `RAZORPAY_WEBHOOK_SECRET` are never sent to the client or returned in API payloads. Only `key_id` is passed for frontend checkout modal initiation.
+2. **Ownership Guard**:
+   - A user cannot pay for, verify, or tamper with another customer's reservation. `booking.userId !== req.user.id` throws a 403 Forbidden.
+3. **Double-Booking & Double-Charge Prevention**:
+   - `createPaymentOrder` reuses existing `razorpayOrderId` if an order was already generated for that booking.
+   - `verifyPayment` returns immediate success if the booking has already transitioned to `CONFIRMED`.
+4. **Idempotent Webhooks**:
+   - Deduplicated via the `ProcessedWebhookEvent` table (`eventId @unique`), ensuring network retries from Razorpay do not result in repeated DB operations.
+5. **Atomic Transitions**:
+   - Seat reservation confirmation is strictly transactional: `Booking.status` becomes `CONFIRMED` simultaneously with `ShowSeat.status` becoming `BOOKED`.
+
+---
+
+### Phase 7 — Production-Ready React + Vite + Tailwind CSS Frontend (✅ Complete)
+
+- **Date**: 2026-11-16
+- **Status**: Completed implementation and successfully compiled production build.
+- **What happened**: Built a complete, production-quality frontend application inspired by BookMyShow and modern streaming platforms with a dark charcoal and crimson aesthetic, complete responsive navigation, live seat layout grid, Razorpay modal integration, and client-side caching.
+
+#### Frontend Architecture & Key Packages
+
+| Layer / Concern | Technology |
+|---|---|
+| Core Framework | React 19 + TypeScript + Vite |
+| Styling & Theme | Tailwind CSS v4 (@tailwindcss/vite) with custom dark cinema palette (`#0b0f19`) |
+| Routing & Guards | React Router DOM v7 (`BrowserRouter`, `Routes`, `Route`, `ProtectedRoute`) |
+| Server State & Caching | TanStack React Query v5 |
+| API Communication | Axios with automatic Bearer token interceptor |
+| Real-time Socket | Socket.IO Client for room-based seat sync |
+| Icons | Lucide React |
+
+#### Files Created / Modified
+
+| File | Purpose |
+|---|---|
+| `client/vite.config.ts` | Configured Vite with React, Tailwind CSS plugin, and proxy to backend `http://localhost:5000`. |
+| `client/index.html` | HTML entrypoint with title, dark styling, and Razorpay `checkout.js` script tag. |
+| `client/src/index.css` | Global styling, custom scrollbars, and cinema dark color variables. |
+| `client/src/types/index.ts` | Complete TypeScript models: `Movie`, `Theatre`, `Screen`, `Show`, `ShowSeatItem`, `Booking`, `User`. |
+| `client/src/services/api.ts` | Centralized Axios instance with JWT request interceptor and automatic 401 handling. |
+| `client/src/services/socket.ts` | Singleton Socket.IO connection manager. |
+| `client/src/contexts/AuthContext.tsx` | Global authentication provider with `user`, `token`, `login`, and `logout`. |
+| `client/src/contexts/BookingContext.tsx` | Global booking state provider (selected seats, show metadata, total price). |
+| `client/src/utils/formatters.ts` | Formatter helpers for Indian currency (`₹`), dates, and showtimes. |
+| `client/src/components/Navbar.tsx` | Sticky header with brand logo, ticket links, and user state menu. |
+| `client/src/components/Footer.tsx` | Footer with platform links and branding. |
+| `client/src/components/MovieCard.tsx` | Responsive movie card with poster, rating badge, language tag, and booking CTA. |
+| `client/src/components/ProtectedRoute.tsx` | Route guard that redirects unauthenticated users to `/login`. |
+| `client/src/pages/HomePage.tsx` | Hero banner with featured title, search input, genre pill filters, and "Now Showing" movie grid. |
+| `client/src/pages/LoginPage.tsx` | Responsive login form with email/password validation and JWT storage. |
+| `client/src/pages/RegisterPage.tsx` | Clean registration form with password length verification. |
+| `client/src/pages/MovieDetailPage.tsx` | Movie overview, duration, genres, city filter, and theatre showtime cards. |
+| `client/src/pages/SeatSelectionPage.tsx` | Interactive curved cinema screen seat grid, categories, seat status legend, and live selection bar. |
+| `client/src/pages/BookingSummaryPage.tsx` | Reservation breakdown, live 10-minute hold countdown timer, release hold button, and Razorpay pay action. |
+| `client/src/pages/PaymentSuccessPage.tsx` | Confirmation receipt with payment reference and dashboard CTA. |
+| `client/src/pages/PaymentFailurePage.tsx` | Friendly failure notification with retry options. |
+| `client/src/pages/UserDashboardPage.tsx` | User profile details and booking history overview. |
+| `client/src/App.tsx` | Root application orchestrating React Query, AuthProvider, BookingProvider, and route definitions. |
 
 ---
 

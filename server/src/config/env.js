@@ -45,6 +45,11 @@ const config = {
   },
   clientUrl: process.env.CLIENT_URL || 'http://localhost:5173',
   redisUrl: process.env.REDIS_URL || 'redis://localhost:6379',
+  razorpay: {
+    keyId: process.env.RAZORPAY_KEY_ID || 'rzp_test_dummy_key_id',
+    keySecret: process.env.RAZORPAY_KEY_SECRET || 'dummy_razorpay_secret_key',
+    webhookSecret: process.env.RAZORPAY_WEBHOOK_SECRET || 'dummy_webhook_secret',
+  },
   isProduction: process.env.NODE_ENV === 'production',
   isDevelopment: process.env.NODE_ENV === 'development',
   isTest: process.env.NODE_ENV === 'test',
