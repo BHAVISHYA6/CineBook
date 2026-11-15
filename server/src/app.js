@@ -31,6 +31,7 @@ const authRoutes = require('./routes/auth.routes');
 const movieRoutes = require('./routes/movie.routes');
 const theatreRoutes = require('./routes/theatre.routes');
 const showRoutes = require('./routes/show.routes');
+const bookingRoutes = require('./routes/booking.routes');
 const { notFoundHandler, errorHandler } = require('./middleware/errorHandler');
 
 const app = express();
@@ -79,8 +80,9 @@ app.use('/api/v1/theatres', theatreRoutes);
 app.use('/api/shows', showRoutes);
 app.use('/api/v1/shows', showRoutes);
 
-// Placeholder: future route modules will be mounted here in later phases.
-// app.use('/api/v1/bookings', bookingRoutes);
+// Booking and seat reservation endpoints
+app.use('/api/bookings', bookingRoutes);
+app.use('/api/v1/bookings', bookingRoutes);
 
 // ─── ERROR HANDLING (MUST BE LAST) ────────────────────────────────────────────
 // 404 for any route that didn't match above.

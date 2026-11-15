@@ -137,10 +137,11 @@ If already processed, it returns 200 without re-executing. This is **idempotent 
 | 2 | ✅ Complete | User Authentication: JWT, bcrypt, register/login/me, auth middleware, test suite |
 | 3 | ✅ Complete | Movies, Theatres, Screens, Seats & Shows APIs (Public & Admin) |
 | 4 | ✅ Complete | Redis Caching (Cache-aside for catalog APIs, invalidations, fallback) |
-| 5 | 🔜 Pending | Redis temporary seat locking + Socket.IO real-time seat sync |
-| 6 | 🔜 Pending | Booking engine + Razorpay test mode payment |
-| 7 | 🔜 Pending | React frontend (Vite + Tailwind CSS) |
-| 8 | 🔜 Pending | Load tests + performance benchmarks (Autocannon) |
+| 5 | ✅ Complete | Concurrency-Safe Seat Locking (Redis SETNX TTL + PostgreSQL Transactions) |
+| 6 | 🔜 Pending | Socket.IO real-time seat status synchronization |
+| 7 | 🔜 Pending | Booking checkout + Razorpay test mode payments & webhook idempotency |
+| 8 | 🔜 Pending | React frontend (Vite + Tailwind CSS) |
+| 9 | 🔜 Pending | Load tests + concurrency benchmarks (Autocannon) |
 
 ---
 
@@ -309,6 +310,46 @@ If already processed, it returns 200 without re-executing. This is **idempotent 
 - All cache service methods check `isRedisHealthy()` before sending commands.
 - All operations are wrapped in `try/catch` and log a non-fatal warning on errors.
 - If Redis is down, calls immediately fallback to querying PostgreSQL directly with zero request interruption.
+
+---
+
+### Phase 5 — Concurrency-Safe Seat Locking (✅ Complete)
+
+- **Date**: 2026-11-16
+- **Status**: Completed implementation.
+- **What happened**: Implemented a two-phase concurrency-safe seat locking mechanism combining high-throughput Redis distributed locks (`SET key val EX 600 NX`) with atomic PostgreSQL transactions using existing `ShowSeat` and `Booking` models.
+
+#### Files Created / Modified
+
+| File | Type | Purpose |
+|---|---|---|
+| `server/src/services/seatLock.service.js` | Created | Core reservation engine: multi-seat atomic Redis lock acquisition with rollback, PostgreSQL transaction verification, hold expiry handling, seat release, and reservation status query. |
+| `server/src/controllers/booking.controller.js` | Created | Controller for authenticated seat reservation (`reserveSeats`), manual release (`releaseReservation`), and status checking (`getBookingStatus`). |
+| `server/src/routes/booking.routes.js` | Created | Routes mounted at `/api/bookings` with JWT authentication middleware applied. |
+| `server/src/routes/show.routes.js` | Modified | Added shortcut reservation route `POST /api/shows/:showId/reserve`. |
+| `server/src/app.js` | Modified | Mounted `/api/bookings` and `/api/v1/bookings`. |
+
+#### Reservation APIs Implemented
+
+| Method | Endpoint | Auth | Description |
+|---|---|---|---|
+| `POST` | `/api/bookings/reserve` (or `/api/shows/:showId/reserve`) | User JWT | Reserve up to 10 seats for a show for 10 minutes (600s TTL). Returns `PENDING` booking with total amount and seat details. |
+| `POST` | `/api/bookings/:id/release` | User JWT | Manually release held seats and cancel the pending reservation before payment. |
+| `GET` | `/api/bookings/:id` | User JWT | Retrieve reservation status, seat breakdown, expiry timestamp, and remaining seconds. |
+
+#### Concurrency & Correctness Guarantees
+
+1. **Two-Tier Locking Hierarchy**:
+   - **Tier 1 (Redis `SET ... EX 600 NX`)**: Fast frontline defense. Prevents multiple concurrent HTTP requests from entering the database reservation path for the same seat.
+   - **Tier 2 (PostgreSQL Transaction)**: Ultimate source of truth. Validates that seats are not permanently `BOOKED` and that any existing `HELD` status has actually expired (`heldUntil < now()`).
+2. **Atomic Batch Lock with Rollback**:
+   - If a customer requests seats `[A1, A2, A3]` and `A3` fails to acquire the Redis lock, all newly acquired locks (`A1`, `A2`) are immediately released (`redis.del`).
+3. **Database Consistency Guarantee**:
+   - If the PostgreSQL transaction fails or conflicts, all Redis locks acquired for that batch are automatically cleaned up in the `catch` block.
+4. **Automatic Expiration**:
+   - Both Redis key TTL (10m) and PostgreSQL `heldUntil` timestamp enforce a 10-minute hold window. Expired holds are automatically eligible for new reservations.
+5. **No Schema Changes**:
+   - Successfully reused existing `ShowSeat` (`heldByUserId`, `heldUntil`, `status: HELD`) and `Booking` (`status: PENDING`, `expiresAt`) models without altering the Prisma schema.
 
 ---
 
