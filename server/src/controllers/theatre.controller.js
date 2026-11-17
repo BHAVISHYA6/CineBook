@@ -280,9 +280,78 @@ async function createScreen(req, res, next) {
   }
 }
 
+/**
+ * PATCH /api/theatres/:id
+ * Update theatre details (name, city, address, isActive)
+ */
+async function updateTheatre(req, res, next) {
+  try {
+    const { id } = req.params;
+    const { name, city, address, isActive } = req.body || {};
+
+    const existing = await prisma.theatre.findUnique({ where: { id } });
+    if (!existing) throw new AppError('Theatre not found', 404, 'NOT_FOUND');
+
+    const data = {};
+    if (name !== undefined) data.name = name.trim();
+    if (city !== undefined) data.city = city.trim();
+    if (address !== undefined) data.address = address.trim();
+    if (isActive !== undefined) data.isActive = Boolean(isActive);
+
+    const updated = await prisma.theatre.update({
+      where: { id },
+      data,
+    });
+
+    await Promise.all([
+      cacheService.del(`theatres:detail:${id}`),
+      cacheService.deleteByPattern('theatres:list:*'),
+    ]);
+
+    return res.status(200).json({
+      success: true,
+      message: 'Theatre updated successfully',
+      data: { theatre: updated },
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
+/**
+ * DELETE /api/theatres/:id
+ * Deactivate theatre
+ */
+async function deleteTheatre(req, res, next) {
+  try {
+    const { id } = req.params;
+    const existing = await prisma.theatre.findUnique({ where: { id } });
+    if (!existing) throw new AppError('Theatre not found', 404, 'NOT_FOUND');
+
+    await prisma.theatre.update({
+      where: { id },
+      data: { isActive: false },
+    });
+
+    await Promise.all([
+      cacheService.del(`theatres:detail:${id}`),
+      cacheService.deleteByPattern('theatres:list:*'),
+    ]);
+
+    return res.status(200).json({
+      success: true,
+      message: 'Theatre deactivated successfully',
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
 module.exports = {
   getTheatres,
   getTheatreById,
   createTheatre,
+  updateTheatre,
+  deleteTheatre,
   createScreen,
 };

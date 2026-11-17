@@ -33,6 +33,7 @@ const theatreRoutes = require('./routes/theatre.routes');
 const showRoutes = require('./routes/show.routes');
 const bookingRoutes = require('./routes/booking.routes');
 const paymentRoutes = require('./routes/payment.routes');
+const adminRoutes = require('./routes/admin.routes');
 const { notFoundHandler, errorHandler } = require('./middleware/errorHandler');
 
 const app = express();
@@ -96,6 +97,10 @@ app.use('/api/v1/bookings', bookingRoutes);
 // Payment endpoints (Razorpay order, verification, webhook)
 app.use('/api/payments', paymentRoutes);
 app.use('/api/v1/payments', paymentRoutes);
+
+// Admin dashboard & management endpoints
+app.use('/api/admin', adminRoutes);
+app.use('/api/v1/admin', adminRoutes);
 
 // ─── ERROR HANDLING (MUST BE LAST) ────────────────────────────────────────────
 // 404 for any route that didn't match above.

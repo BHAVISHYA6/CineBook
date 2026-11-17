@@ -679,18 +679,110 @@ To test user authentication manually using Postman or cURL once your server is r
 
 ---
 
-## 10. Known Limitations & Remaining Issues
+## 12. Phase 8 — Authentication Enhancements & Admin Dashboard
 
-1. **Local PostgreSQL Database**:
-   - The PostgreSQL service on the host machine is currently not running or `cinebook_db` has not yet been created.
-   - To run migrations and seed data on local machine:
-     ```bash
-     createdb cinebook_db
-     npm run db:migrate
-     npm run db:seed
-     ```
-2. **Upcoming Modules**:
-   - Movies and Show catalog APIs (Phase 3).
-   - Redis temporary seat hold coordinator (Phase 3).
-   - Socket.IO real-time seat status synchronization (Phase 3).
-   - Booking checkout & Razorpay payment integration (Phase 4).
+### 1. Overview & Architecture Additions
+Phase 8 introduces enterprise-grade authentication enhancements (Email OTP verification, Refresh Token rotation) and a comprehensive, protected Admin Dashboard for managing cinema inventory, Cloudinary poster assets, show scheduling with conflict avoidance, and customer booking audits.
+
+### 2. Features Implemented
+
+#### A. Email OTP Authentication
+- **Secure Generation**: 6-digit cryptographically strong OTPs generated using `crypto.randomInt`.
+- **Hashed Storage**: Plaintext OTPs are NEVER stored. Hashed using SHA-256 (`crypto.createHash('sha256')`) with per-email salt.
+- **Storage & TTL**: Redis backed with 300s (5-minute) TTL and memory-store fallback.
+- **Security Invariants**:
+  - Maximum 3 verification attempts before invalidating the OTP to resist brute-force attacks.
+  - Constant-time verification (`crypto.timingSafeEqual`) to prevent timing side-channels.
+  - 60-second cooldown timer between OTP generation requests to prevent flooding.
+  - Single-use: OTP is burned immediately upon successful registration.
+- **Client Integration**: 2-step registration modal in `RegisterPage.jsx` with resend countdown timer.
+
+#### B. Refresh Token Authentication & Rotation
+- **Token Dual-Tier**:
+  - Access Token: short-lived (15 minutes).
+  - Refresh Token: long-lived (7 days).
+- **Rotation & Invalidation**:
+  - Each refresh request rotates the refresh token (burns the old one and issues a fresh pair).
+  - Logout endpoint explicitly blacklists and revokes active refresh tokens.
+- **Client Auto-Refresh Interceptor**:
+  - Axios response interceptor queues failed requests during 401s, attempts silent token refresh via `/api/auth/refresh`, and transparently replays queued requests.
+  - Automatically clears credentials and redirects to login if the refresh token is expired or revoked.
+
+#### C. Cloudinary Integration
+- Integrated Cloudinary v2 SDK (`server/src/config/cloudinary.js`).
+- Backend endpoint `POST /api/admin/upload-image` using `multer.memoryStorage()` for secure streaming uploads.
+- Client component `ImageUpload.jsx` supporting file validation (max 5MB, JPEG/PNG/WEBP), upload progress, and image previews.
+
+#### D. Full-Featured Admin Dashboard
+- **Protected Routing**: `AdminRoute.jsx` enforcing role checks both client-side and server-side (`authenticate, authorize('ADMIN')`).
+- **Dashboard Overview (`/admin`)**: Real-time KPI statistics: Total Movies, Theatres, Active Shows, Total Bookings, and Total Revenue (in ₹), plus recent customer booking activity.
+- **Movie Management (`/admin/movies`)**: Create, edit, view, and deactivate movies, with Cloudinary poster uploads.
+- **Theatre & Screen Management (`/admin/theatres`)**: Manage cinema properties, add screens, and generate custom seating layouts (Standard, Premium, Recliner rows).
+- **Showtime Scheduling (`/admin/shows`)**: Schedule screenings with conflict detection (preventing overlapping shows in the same auditorium), ticket tier pricing, and automatic ShowSeat inventory creation.
+- **Booking Auditing (`/admin/bookings`)**: Search and filter bookings by customer, email, movie title, or status (CONFIRMED, PENDING, CANCELLED, EXPIRED) with pagination and payment provider tracking.
+
+### 3. New API Endpoints
+| Method | Endpoint | Access | Purpose |
+|---|---|---|---|
+| POST | `/api/auth/register-otp` | Public | Initiate registration & generate hashed OTP |
+| POST | `/api/auth/verify-otp` | Public | Verify OTP & create account |
+| POST | `/api/auth/refresh` | Public | Exchange refresh token for fresh access token |
+| POST | `/api/auth/logout` | Authenticated | Invalidate refresh token & logout session |
+| GET | `/api/admin/overview` | Admin | Dashboard summary KPIs and recent bookings |
+| GET | `/api/admin/bookings` | Admin | Searchable, filterable booking list |
+| POST | `/api/admin/upload-image` | Admin | Cloudinary image upload (multipart) |
+| GET | `/api/shows` | Public/Admin | List all scheduled shows with filters |
+| POST | `/api/shows` (or `/api/admin/shows`) | Admin | Create show with conflict prevention |
+| DELETE | `/api/shows/:id` | Admin | Deactivate scheduled show |
+| PATCH | `/api/theatres/:id` | Admin | Update theatre details |
+| DELETE | `/api/theatres/:id` | Admin | Deactivate theatre |
+
+### 1. Motivation & Overview
+Migrated the entire frontend from React + Vite + TypeScript to React + Vite + JavaScript (ES6+), adopting Redux Toolkit for centralized client-side state management while retaining TanStack React Query for server-side asynchronous data fetching and caching.
+
+### 2. Architecture & State Management Division
+- **Redux Toolkit (`@reduxjs/toolkit`, `react-redux`)**:
+  - `authSlice` (`store/slices/authSlice.js`): Manages authentication state (`token`, `user`, `isAuthenticated`, `isLoading`), persisted to `localStorage` (`cinebook_token`, `cinebook_user`).
+  - `bookingSlice` (`store/slices/bookingSlice.js`): Manages the checkout flow: selected movie, show, theatre/screen info, chosen seats (up to 10 seats), total price calculation, and active reservation ID.
+  - `uiSlice` (`store/slices/uiSlice.js`): Manages global loading overlays, modals, and toasts/notifications.
+- **TanStack React Query (`@tanstack/react-query`)**:
+  - Handles server state, caching, refetching, and polling fallback for movie listings, show details, seat availability, and user order history.
+- **Socket.IO Client (`socket.io-client`)**:
+  - Maintains real-time room-based seat status synchronization (`join:show`, `leave:show`, `seats:updated`).
+
+### 3. Files Converted / Created
+- **Store**:
+  - `client/src/store/index.js`
+  - `client/src/store/slices/authSlice.js`
+  - `client/src/store/slices/bookingSlice.js`
+  - `client/src/store/slices/uiSlice.js`
+- **Services & Utils**:
+  - `client/src/services/api.js`
+  - `client/src/services/socket.js`
+  - `client/src/utils/formatters.js`
+- **Components & Pages (`.jsx`)**:
+  - `client/src/components/Navbar.jsx`
+  - `client/src/components/Footer.jsx`
+  - `client/src/components/MovieCard.jsx`
+  - `client/src/components/ProtectedRoute.jsx`
+  - `client/src/pages/HomePage.jsx`
+  - `client/src/pages/LoginPage.jsx`
+  - `client/src/pages/RegisterPage.jsx`
+  - `client/src/pages/MovieDetailPage.jsx`
+  - `client/src/pages/SeatSelectionPage.jsx`
+  - `client/src/pages/BookingSummaryPage.jsx`
+  - `client/src/pages/PaymentSuccessPage.jsx`
+  - `client/src/pages/PaymentFailurePage.jsx`
+  - `client/src/pages/UserDashboardPage.jsx`
+- **App Entry & Config**:
+  - `client/src/App.jsx`
+  - `client/src/main.jsx`
+  - `client/vite.config.js`
+  - `client/index.html` (updated to point to `/src/main.jsx`)
+  - `client/package.json` (build script updated to `vite build`)
+
+### 4. Verification
+- Removed all `.ts`, `.tsx`, `tsconfig*.json`, and TypeScript-specific packages.
+- Tested production build with `npm run build` in `client`:
+  - 2,252 modules transformed cleanly.
+  - Production bundle generated without warnings or errors.

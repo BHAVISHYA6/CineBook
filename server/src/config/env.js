@@ -41,10 +41,17 @@ const config = {
   databaseUrl: process.env.DATABASE_URL,
   jwt: {
     secret: process.env.JWT_SECRET,
-    expiresIn: process.env.JWT_EXPIRES_IN || '7d',
+    expiresIn: process.env.JWT_EXPIRES_IN || '15m',
+    refreshSecret: process.env.JWT_REFRESH_SECRET || process.env.JWT_SECRET + '_refresh',
+    refreshExpiresIn: process.env.JWT_REFRESH_EXPIRES_IN || '7d',
   },
   clientUrl: process.env.CLIENT_URL || 'http://localhost:5173',
   redisUrl: process.env.REDIS_URL || 'redis://localhost:6379',
+  cloudinary: {
+    cloudName: process.env.CLOUDINARY_CLOUD_NAME || 'demo',
+    apiKey: process.env.CLOUDINARY_API_KEY || 'demo_key',
+    apiSecret: process.env.CLOUDINARY_API_SECRET || 'demo_secret',
+  },
   razorpay: {
     keyId: process.env.RAZORPAY_KEY_ID || 'rzp_test_dummy_key_id',
     keySecret: process.env.RAZORPAY_KEY_SECRET || 'dummy_razorpay_secret_key',

@@ -3,7 +3,7 @@
  *
  * RESPONSIBILITY:
  *   Handles cryptographic password hashing/comparison via bcryptjs and
- *   generation/verification of signed JSON Web Tokens (JWT).
+ *   generation/verification of signed JSON Web Tokens (Access & Refresh tokens).
  *   Also provides a sanitizer to strip sensitive fields (password hash)
  *   from User records before returning them to clients.
  */
@@ -36,7 +36,7 @@ async function comparePassword(candidatePassword, hash) {
 }
 
 /**
- * Signs a JWT with the given payload using environment secret and expiration.
+ * Signs an access JWT with the given payload using environment secret and expiration.
  * @param {object} payload - Claims to encode (e.g. { id, role }).
  * @returns {string} Signed JWT string.
  */
@@ -47,13 +47,33 @@ function generateToken(payload) {
 }
 
 /**
- * Verifies a JWT token using the configured secret.
+ * Signs a refresh JWT with the given payload using refresh secret and expiration.
+ * @param {object} payload - Claims to encode (e.g. { id, role }).
+ * @returns {string} Signed refresh JWT string.
+ */
+function generateRefreshToken(payload) {
+  return jwt.sign(payload, config.jwt.refreshSecret, {
+    expiresIn: config.jwt.refreshExpiresIn,
+  });
+}
+
+/**
+ * Verifies an access JWT token using the configured secret.
  * Throws an error if the token has expired, is malformed, or signature mismatch.
  * @param {string} token - Bearer JWT token string.
  * @returns {object} Decoded token payload.
  */
 function verifyToken(token) {
   return jwt.verify(token, config.jwt.secret);
+}
+
+/**
+ * Verifies a refresh JWT token using the configured refresh secret.
+ * @param {string} token - Refresh token string.
+ * @returns {object} Decoded token payload.
+ */
+function verifyRefreshToken(token) {
+  return jwt.verify(token, config.jwt.refreshSecret);
 }
 
 /**
@@ -72,6 +92,8 @@ module.exports = {
   hashPassword,
   comparePassword,
   generateToken,
+  generateRefreshToken,
   verifyToken,
+  verifyRefreshToken,
   toSafeUser,
 };

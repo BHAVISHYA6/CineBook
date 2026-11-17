@@ -307,8 +307,88 @@ async function createShow(req, res, next) {
   }
 }
 
+/**
+ * GET /api/shows
+ * List shows with optional filters (movieId, screenId, theatreId, date)
+ */
+async function getShows(req, res, next) {
+  try {
+    const { movieId, screenId, theatreId, date, isActive } = req.query || {};
+
+    const where = {};
+    if (isActive !== undefined) {
+      where.isActive = isActive === 'true';
+    } else {
+      where.isActive = true;
+    }
+
+    if (movieId) where.movieId = movieId;
+    if (screenId) where.screenId = screenId;
+    if (theatreId) where.screen = { theatreId };
+
+    if (date) {
+      const dayStart = new Date(date);
+      dayStart.setUTCHours(0, 0, 0, 0);
+      const dayEnd = new Date(date);
+      dayEnd.setUTCHours(23, 59, 59, 999);
+      where.startsAt = { gte: dayStart, lte: dayEnd };
+    }
+
+    const shows = await prisma.show.findMany({
+      where,
+      include: {
+        movie: { select: { id: true, title: true, durationMin: true, posterUrl: true } },
+        screen: {
+          include: {
+            theatre: { select: { id: true, name: true, city: true } },
+          },
+        },
+        _count: {
+          select: { showSeats: true },
+        },
+      },
+      orderBy: { startsAt: 'asc' },
+    });
+
+    return res.status(200).json({
+      success: true,
+      data: { shows },
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
+/**
+ * DELETE /api/shows/:id
+ * Soft delete / deactivate show
+ */
+async function deleteShow(req, res, next) {
+  try {
+    const { id } = req.params;
+    const show = await prisma.show.findUnique({ where: { id } });
+    if (!show) throw new AppError('Show not found', 404, 'NOT_FOUND');
+
+    await prisma.show.update({
+      where: { id },
+      data: { isActive: false },
+    });
+
+    await cacheService.del(`shows:detail:${id}`);
+
+    return res.status(200).json({
+      success: true,
+      message: 'Show deactivated successfully',
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
 module.exports = {
+  getShows,
   getShowById,
   getShowSeats,
   createShow,
+  deleteShow,
 };

@@ -17,6 +17,8 @@ const {
   getTheatres,
   getTheatreById,
   createTheatre,
+  updateTheatre,
+  deleteTheatre,
   createScreen,
 } = require('../controllers/theatre.controller');
 const { authenticate, authorize } = require('../middleware/auth');
@@ -29,6 +31,8 @@ router.get('/:id', getTheatreById);
 
 // Admin-protected routes
 router.post('/', authenticate, authorize('ADMIN'), createTheatre);
+router.patch('/:id', authenticate, authorize('ADMIN'), updateTheatre);
+router.delete('/:id', authenticate, authorize('ADMIN'), deleteTheatre);
 router.post('/:id/screens', authenticate, authorize('ADMIN'), createScreen);
 
 module.exports = router;
